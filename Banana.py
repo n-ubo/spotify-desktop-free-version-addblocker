@@ -1,5 +1,5 @@
-from win32gui import CloseWindow, EnumWindows, GetWindowText, GetClassName
-from win32api import keybd_event, MapVirtualKey, OpenProcess
+from win32gui import CloseWindow, EnumWindows, GetWindowText, GetClassName, PostMessage
+from win32api import OpenProcess
 from win32process import GetWindowThreadProcessId, GetModuleFileNameEx
 import tkinter as tk
 from tkinter import *
@@ -51,6 +51,11 @@ DEFAULT_SETTINGS = {
 IDLE_TITLES = ('Spotify', 'Spotify Free', 'Spotify Premium')
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
+# media commands posted straight to spotify's window, so no other app or focus is involved
+WM_APPCOMMAND = 0x0319
+APPCOMMAND_MEDIA_NEXTTRACK = 11
+APPCOMMAND_MEDIA_PLAY_PAUSE = 14
+
 def load_settings():
     # start from the defaults and lay the saved values over them,
     # so settings added in newer versions show up without breaking old files
@@ -89,9 +94,8 @@ win32gui.ShowWindow(win, 0)
 
 class Actions():
 
-    def hwcode(Media):
-        hwcode = MapVirtualKey(Media, 0)
-        return hwcode
+    def media_command(hwnd, command):
+        PostMessage(hwnd, WM_APPCOMMAND, hwnd, command << 16)
 
     def kill(app):
         notified=False
@@ -112,7 +116,8 @@ class Actions():
                         notification.icon = banana
                         notification.application_name = name
                         notification.message = 'Add found in: '+app
-                        notification.send()
+                        # don't wait for the toast, it holds up the restart by a second or more
+                        notification.send(block=False)
                 if re.findall(r'[0-9]{3,6}', procces_info):
                     pid=re.findall(r'[0-9]{3,6}', procces_info)[0]
                     print('attempting to kill: '+pid)
@@ -126,8 +131,18 @@ class Actions():
         return found, killed
 
     def resume(reply, app):
-        keybd_event(0xB3, Actions.hwcode(0xB3)) #play
-        keybd_event(0xB0, Actions.hwcode(0xB0)) #next
+        # a freshly started spotify can ignore commands until it has loaded,
+        # so keep pressing play until the title shows a song again
+        # check often, but only press again every 1.5s so a slow title update doesn't pause it again
+        for tries in range(0, 45):
+            hwnd, title = Actions.spotify_window()
+            if hwnd and title not in IDLE_TITLES:
+                break
+            if hwnd and tries % 5 == 0:
+                Actions.media_command(hwnd, APPCOMMAND_MEDIA_PLAY_PAUSE)
+            sleep(.3)
+        if hwnd:
+            Actions.media_command(hwnd, APPCOMMAND_MEDIA_NEXTTRACK)
         js=load_settings()
         if js['settings']['debug_notification']['enabled']==1:
             notification = Notify()
@@ -135,7 +150,7 @@ class Actions():
             notification.icon = banana
             notification.application_name = name
             notification.message = 'Succesfully resumed '+app+', killed: '+str(reply[1])+' of '+str(reply[0])+' '+app+' processes.'
-            notification.send()
+            notification.send(block=False)
 
     def escape(reason):
         notification = Notify()
@@ -166,7 +181,8 @@ class Actions():
 
     def open_spotify(path):
         if os.path.exists(path):
-            subprocess.Popen([path], cwd=os.path.dirname(path))
+            # --minimized is what spotify's own autostart uses, it opens without grabbing focus
+            subprocess.Popen([path, '--minimized'], cwd=os.path.dirname(path))
         else:
             # microsoft store installs can't be started by path, the protocol works for both
             os.startfile('spotify:')
@@ -197,15 +213,14 @@ class Actions():
     def restart_spotify(path):
         reply=Actions.kill('spotify')
         Actions.open_spotify(path)
-        for tries in range(0, 20):
-            sleep(.5)
+        for tries in range(0, 50):
+            sleep(.2)
             hwnd, title = Actions.spotify_window()
             if hwnd:
                 CloseWindow(hwnd)
                 break
         else:
             Actions.apology('spotify')
-        sleep(1)
         Actions.resume(reply, 'spotify')
 
     def shutdown():
