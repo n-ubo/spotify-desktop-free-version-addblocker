@@ -5,20 +5,74 @@ from tkinter import *
 from tkinter import filedialog, messagebox
 from tkinter.ttk import *
 from time import sleep
-import os
-import winshell
 import signal
 import subprocess, re, os
 from notifypy import Notify
 import json
 import ctypes
-from win32com.client import Dispatch
+import copy
+import sys
+import threading
+import pystray
+from PIL import Image
 
-path = r"H:\happy\hi\new.lnk"  # Path to be saved (shortcut)
-target = r"D:\New folder\new.exe"  # The shortcut target file or folder
-work_dir = r"D:\New folder"  # The parent folder of your file
-name=str(os.path.basename(__file__))
-banana=r'assets\banana.ico'
+def resource(relative):
+    # icons are bundled into the exe, PyInstaller unpacks them to sys._MEIPASS
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative)
+
+name='Banana'
+banana=resource(r'assets\banana.ico')
+
+# user settings live in %APPDATA%\Banana, so the exe can be put (or sent) anywhere
+APP_DIR = os.path.join(os.environ['APPDATA'], 'Banana')
+SETTINGS_FILE = os.path.join(APP_DIR, 'settings.json')
+DEFAULT_SPOTIFY = os.path.join(os.environ['APPDATA'], 'Spotify', 'Spotify.exe')
+
+DEFAULT_SETTINGS = {
+    "settings": {
+        "path": "",
+        "start_notification": {"enabled": 1, "title": "Start notification on banana launch"},
+        "found_notification": {"enabled": 1, "title": "Advertisement found notification"},
+        "debug_notification": {"enabled": 1, "title": "Killed procceses notification"},
+        "setting_startup": {"enabled": 1, "title": "Open this menu on banana launch"},
+        "start_on_launch": {"enabled": 0, "title": "Start banana on start up"},
+        "blacklist_notifications": {"enabled": 0, "title": "Banana prompt to help block more adds"},
+    },
+    "blacklist": [
+        "Advertisement",
+        "Bel of chat met ons, want dat lucht op!",
+        "Stichting Massaschade & Consument",
+        "Spotify",
+    ],
+}
+
+def load_settings():
+    # start from the defaults and lay the saved values over them,
+    # so settings added in newer versions show up without breaking old files
+    data = copy.deepcopy(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_FILE) as f:
+            saved = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        saved = {}
+    for key, value in saved.get('settings', {}).items():
+        if key not in data['settings']:
+            continue
+        if isinstance(value, dict):
+            data['settings'][key]['enabled'] = value.get('enabled', data['settings'][key]['enabled'])
+        else:
+            data['settings'][key] = value
+    if 'blacklist' in saved:
+        data['blacklist'] = saved['blacklist']
+    if data['settings']['path'] == "" and os.path.exists(DEFAULT_SPOTIFY):
+        data['settings']['path'] = DEFAULT_SPOTIFY
+    return data
+
+def save_settings(data):
+    os.makedirs(APP_DIR, exist_ok=True)
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(data, f, indent=4)
 
 myappid = 'mycompany.myproduct.subproduct.version'
 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
@@ -39,16 +93,15 @@ class Actions():
         notified=False
         found=0
         killed=0
-        cmd = 'WMIC PROCESS get Caption,Processid'
-        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
+        cmd = 'tasklist /FO CSV /NH'
+        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
         for line in proc.stdout:
             procces_info=str(line)
             if app in procces_info.lower():
                 found+=1
                 if notified==False:
                     notified=True
-                    f=open('settings.json')
-                    js=json.load(f)
+                    js=load_settings()
                     if js['settings']['found_notification']['enabled']==1:
                         notification = Notify()
                         notification.title = 'Advertisement'
@@ -71,8 +124,7 @@ class Actions():
     def resume(reply, app):
         keybd_event(0xB3, Actions.hwcode(0xB3)) #play
         keybd_event(0xB0, Actions.hwcode(0xB0)) #next
-        f=open('settings.json')
-        js=json.load(f)
+        js=load_settings()
         if js['settings']['debug_notification']['enabled']==1:
             notification = Notify()
             notification.title = 'Add skipped'
@@ -88,7 +140,7 @@ class Actions():
         notification.application_name = name
         notification.message = reason
         notification.send()
-        quit('Exiting program')
+        Actions.shutdown()
 
     def apology(app):
         notification = Notify()
@@ -97,7 +149,7 @@ class Actions():
         notification.application_name = name
         notification.message = app+' could not be opened, closing banana.'
         notification.send()
-        quit('Exiting program, apology.')
+        Actions.shutdown()
 
     def error():
         notification = Notify()
@@ -106,19 +158,37 @@ class Actions():
         notification.application_name = name
         notification.message = 'Something unknown went wrong, closing banana.'
         notification.send()
-        quit('Exiting program, error.')
+        Actions.shutdown()
 
-    def open_menu(self):
-        window=GUI()
-        window.CreateWindow()
+    def open_spotify(path):
+        subprocess.Popen([path], cwd=os.path.dirname(path))
+
+    def shutdown():
+        # remove the tray icon first, otherwise it lingers until hovered
+        if GUI.tray:
+            GUI.tray.stop()
+        os._exit(0)
 
 class app(Actions):
     def main(self):
         print('running...')
-        f=open('settings.json')
-        js=json.load(f)
-        if js['settings']['setting_startup']['enabled']==1 or not os.path.exists('assets\Spotify.lnk'):
-            Actions.open_menu(self)
+        js=load_settings()
+        window=GUI()
+        window.CreateWindow()
+        if js['settings']['setting_startup']['enabled']==1 or not os.path.exists(js['settings']['path']):
+            window.show()
+        else:
+            window.start_listening()
+        window.master.mainloop()
+
+    def listen():
+        try:
+            app.watch()
+        except Exception:
+            Actions.escape('Banana Interrupted. Exception E.')
+
+    def watch():
+        js=load_settings()
         if js['settings']['start_notification']['enabled']==1:
             notification = Notify()
             notification.title = 'Banana started'
@@ -133,7 +203,7 @@ class app(Actions):
                 foobar1 = FindWindow(None, add)
                 if foobar1:
                     reply=Actions.kill('spotify')
-                    os.startfile('assets\Spotify.lnk')
+                    Actions.open_spotify(js['settings']['path'])
                     for tries in range(0, 10):
                         spotify = FindWindow(None, 'Spotify Free')
                         if spotify:
@@ -148,7 +218,7 @@ class app(Actions):
             if foobar2:
                 if IsWindowVisible(foobar2) == False:
                     reply=Actions.kill('spotify')
-                    os.startfile('assets\Spotify.lnk')
+                    Actions.open_spotify(js['settings']['path'])
                     for tries in range(0, 10):
                         spotify = FindWindow(None, 'Spotify Free')
                         if spotify:
@@ -159,78 +229,81 @@ class app(Actions):
                         sleep(.5)
                     Actions.resume(reply, 'spotify')
 class events():
-    def start(self, master):
-        master.destroy()
+    def start(self, window):
+        window.start_listening()
 
-    def refresh(self, master):
-        master.destroy()
-        GUI.CreateWindow(self)
+    def refresh(self, window):
+        window.CreateWindow()
 
     def getPath(self):
-        with open("settings.json", "r") as jsonFile:
-            data = json.load(jsonFile)
-            data= data["settings"]['path']
-        return data
-    
-    def getKey(self):
-        with open("settings.json", "r") as jsonFile:
-            data = json.load(jsonFile)
-            data= data["settings"]['force_skip_key']
-        return data
+        return load_settings()["settings"]['path']
 
-    def setNewPath(self, master):
-        master.filename = filedialog.askopenfilename(initialdir = "/",title = "Select Spotify.exe",filetypes = (("exe files","*.exe"),("all files","*.*")))
-        with open("settings.json", "r") as jsonFile:
-            data = json.load(jsonFile)
-            data["settings"]['path'] = master.filename
-        with open("settings.json", "w") as jsonFile:
-            json.dump(data, jsonFile,indent = 4)
-        if not os.path.exists('assets\Spotify.lnk'):
-            open('assets\Spotify.lnk', 'x')
-        path = "assets\Spotify.lnk"  # Path to be saved (shortcut)
-        s=str(master.filename).split('/')[-1]
-        target = str(master.filename) # The shortcut target file or folder
-        work_dir = str(master.filename).replace(s,'')  # The parent folder of your file
-        shell = Dispatch('WScript.Shell')
-        shortcut = shell.CreateShortCut(path)
-        shortcut.Targetpath = target
-        shortcut.WorkingDirectory = work_dir
-        shortcut.save()
-        self.refresh(master)
-        return master.filename
+    def setNewPath(self, window):
+        filename = filedialog.askopenfilename(initialdir = "/",title = "Select Spotify.exe",filetypes = (("exe files","*.exe"),("all files","*.*")))
+        if not filename:
+            return
+        data = load_settings()
+        data["settings"]['path'] = os.path.normpath(filename)
+        save_settings(data)
+        self.refresh(window)
+        return filename
 
     def changeNotifications(self, js, type):
-        print(js["settings"][type],js["settings"][type]['enabled'])
-        with open("settings.json", "r") as jsonFile:
-            data = json.load(jsonFile)
+        data = load_settings()
         if data["settings"][type]['enabled']==1:
             data["settings"][type]['enabled']= 0
         else:
             data["settings"][type]['enabled']= 1
-        with open("settings.json", "w") as jsonFile:
-            json.dump(data, jsonFile,indent = 4)
-        print(js["settings"][type],js["settings"][type]['enabled'])
+        save_settings(data)
 
 # Create Frame
 class GUI():
+    tray = None
+
+    def __init__(self):
+        self.listening = False
+        self.master = Tk()
+        self.master.withdraw()
+        self.master.geometry("600x300")
+        self.master.title('Spotify with Banana.py')
+        self.master.iconphoto(False, PhotoImage(file=resource(r'assets\banana.ico')))
+        self.master.resizable(width=False, height=False)
+        self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
+
     def on_closing(self):
-        if messagebox.askokcancel("Quit", "Do you want to quit?"):
-            quit()
+        # while banana is listening, closing the window just sends it back to the tray
+        if self.listening:
+            self.master.withdraw()
+        elif messagebox.askokcancel("Quit", "Do you want to quit?"):
+            Actions.shutdown()
+
+    def show(self):
+        self.master.deiconify()
+        self.master.lift()
+        self.master.focus_force()
+
+    def start_listening(self):
+        self.master.withdraw()
+        if self.listening:
+            return
+        self.listening = True
+        GUI.tray = pystray.Icon('Banana', Image.open(banana), 'Banana', menu=pystray.Menu(
+            pystray.MenuItem('Open Banana', lambda: self.master.after(0, self.show), default=True),
+            pystray.MenuItem('Quit', lambda: self.master.after(0, Actions.shutdown)),
+        ))
+        GUI.tray.run_detached()
+        threading.Thread(target=app.listen, daemon=True).start()
 
     def CreateWindow(self):
 
-        f=open('settings.json')
-        js=json.load(f)
+        js=load_settings()
         remote=events()
-        master = Tk()
+        master = self.master
+        for child in master.winfo_children():
+            child.destroy()
 
-        master.geometry("600x300")
-        master.title('Spotify with Banana.py')
-        master.iconphoto(False, PhotoImage(file='assets/banana.ico'))
-        master.resizable(width=False, height=False)
-
-        bg = PhotoImage(file = "assets/banana.png")
-        label1 = Label( master, image = bg)
+        self.bg = PhotoImage(file = resource(r'assets\banana.png'))
+        label1 = Label( master, image = self.bg)
         label1.place(x = -10, y = -80)
 
         s=Style()
@@ -242,11 +315,8 @@ class GUI():
         main = Frame(main1, style='My.TFrame')
         main.pack(padx=1, pady=1)
         textvariable=remote.getPath()
-        keyvariable=remote.getKey()
         if textvariable=="":
             textvariable="No path selected"
-        if keyvariable=="":
-            keyvariable="No key bound"
         cframe = Frame(main, style='My.TFrame')
         cframe.pack(pady=10, padx=10, side=TOP)
 
@@ -311,20 +381,7 @@ class GUI():
         # e.pack()
         # f2.pack()
 
-        setframe = Frame(main, style='My.TFrame')
-        setframe.pack(pady=1, padx=1,side=TOP)
-        if keyvariable=="No key bound":
-            label = tk.Label(setframe, text = 'Force skip key: [NONE]', fg='yellow', background='black')
-            label.pack(padx=5,pady=5, side=RIGHT)
-            submit2 = tk.Button(setframe,text ='bind key', bg='black', fg='orange')
-            submit2.pack(pady=5,side=LEFT)
-        else:
-            label = tk.Label(setframe, text = 'Force skip key: ['+keyvariable+']', fg='yellow', background='black')
-            label.pack(padx=5,pady=5, side=RIGHT)
-            submit2 = tk.Button(setframe,text ='change key', bg='black', fg='lime')
-            submit2.pack(pady=5,side=LEFT)
-
-        btn = tk.Button(main,text ='set path', bg='black', fg='yellow',command =lambda:remote.setNewPath(master))
+        btn = tk.Button(main,text ='set path', bg='black', fg='yellow',command =lambda:remote.setNewPath(self))
         btn.pack(padx=5,pady=5,side=LEFT)
         if textvariable=="No path selected":
             label = tk.Label(main, text = textvariable, foreground='red', background='black')
@@ -334,20 +391,17 @@ class GUI():
             label.pack(padx=5,pady=5, side=RIGHT)
         if textvariable!="No path selected":
             if 'spotify' in str(textvariable).lower() and '.exe' in str(textvariable).lower():
-                submit = tk.Button(main,text ='start', bg='black', fg='lime',command =lambda: remote.start(master))
+                submit = tk.Button(main,text ='start', bg='black', fg='lime',command =lambda: remote.start(self))
                 submit.pack(pady=5,side=RIGHT)
             elif not '.exe' in str(textvariable).lower():
                 submit = tk.Button(main,text ='path to file needs to be a .exe', bg='black', fg='grey')
                 submit.pack(pady=5,side=RIGHT)
             else:
-                submit = tk.Button(main,text ='Invalid path, start anyway?', bg='black', fg='orange',command =lambda: remote.start(master))
+                submit = tk.Button(main,text ='Invalid path, start anyway?', bg='black', fg='orange',command =lambda: remote.start(self))
                 submit.pack(pady=5,side=RIGHT)
         elif textvariable=="No path selected":
             submit = tk.Button(main,text ='start', bg='black', fg='grey')
             submit.pack(pady=5,side=RIGHT)
-
-        master.protocol("WM_DELETE_WINDOW", lambda:GUI.on_closing(self))
-        mainloop()
 
 try:
     main = app()
