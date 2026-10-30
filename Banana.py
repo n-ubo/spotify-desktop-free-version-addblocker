@@ -1,5 +1,6 @@
-from win32gui import FindWindow, CloseWindow, IsWindowVisible
-from win32api import keybd_event, MapVirtualKey
+from win32gui import CloseWindow, EnumWindows, GetWindowText, GetClassName
+from win32api import keybd_event, MapVirtualKey, OpenProcess
+from win32process import GetWindowThreadProcessId, GetModuleFileNameEx
 import tkinter as tk
 from tkinter import *
 from tkinter import filedialog, messagebox
@@ -43,9 +44,12 @@ DEFAULT_SETTINGS = {
         "Advertisement",
         "Bel of chat met ons, want dat lucht op!",
         "Stichting Massaschade & Consument",
-        "Spotify",
     ],
 }
+
+# window titles spotify shows while paused or idle
+IDLE_TITLES = ('Spotify', 'Spotify Free', 'Spotify Premium')
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 def load_settings():
     # start from the defaults and lay the saved values over them,
@@ -161,7 +165,48 @@ class Actions():
         Actions.shutdown()
 
     def open_spotify(path):
-        subprocess.Popen([path], cwd=os.path.dirname(path))
+        if os.path.exists(path):
+            subprocess.Popen([path], cwd=os.path.dirname(path))
+        else:
+            # microsoft store installs can't be started by path, the protocol works for both
+            os.startfile('spotify:')
+
+    def spotify_window():
+        # spotify's main window is a chromium window owned by Spotify.exe
+        found = []
+        def check(hwnd, _):
+            title = GetWindowText(hwnd)
+            if not title or GetClassName(hwnd) != 'Chrome_WidgetWin_1':
+                return
+            _, pid = GetWindowThreadProcessId(hwnd)
+            try:
+                exe = GetModuleFileNameEx(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid), 0)
+            except Exception:
+                return
+            if exe.lower().endswith('spotify.exe'):
+                found.append((hwnd, title))
+        EnumWindows(check, None)
+        return found[0] if found else (None, None)
+
+    def is_add(title, blacklist):
+        # songs and podcasts are always "artist - title", adds are just the advertiser name
+        if title is None or title in IDLE_TITLES:
+            return False
+        return ' - ' not in title or title in blacklist
+
+    def restart_spotify(path):
+        reply=Actions.kill('spotify')
+        Actions.open_spotify(path)
+        for tries in range(0, 20):
+            sleep(.5)
+            hwnd, title = Actions.spotify_window()
+            if hwnd:
+                CloseWindow(hwnd)
+                break
+        else:
+            Actions.apology('spotify')
+        sleep(1)
+        Actions.resume(reply, 'spotify')
 
     def shutdown():
         # remove the tray icon first, otherwise it lingers until hovered
@@ -199,35 +244,10 @@ class app(Actions):
 
         while True:
             sleep(.5)
-            for add in js['blacklist']:
-                foobar1 = FindWindow(None, add)
-                if foobar1:
-                    reply=Actions.kill('spotify')
-                    Actions.open_spotify(js['settings']['path'])
-                    for tries in range(0, 10):
-                        spotify = FindWindow(None, 'Spotify Free')
-                        if spotify:
-                            CloseWindow(FindWindow(None, 'Spotify Free'))
-                            break
-                        if tries==10:
-                            Actions.apology('spotify')
-                        sleep(.5)
-                    Actions.resume(reply, 'spotify')
-
-            foobar2 = FindWindow(None, 'Spotify Free')
-            if foobar2:
-                if IsWindowVisible(foobar2) == False:
-                    reply=Actions.kill('spotify')
-                    Actions.open_spotify(js['settings']['path'])
-                    for tries in range(0, 10):
-                        spotify = FindWindow(None, 'Spotify Free')
-                        if spotify:
-                            CloseWindow(FindWindow(None, 'Spotify Free'))
-                            break
-                        if tries==10:
-                            Actions.apology('spotify')
-                        sleep(.5)
-                    Actions.resume(reply, 'spotify')
+            hwnd, title = Actions.spotify_window()
+            if Actions.is_add(title, js['blacklist']):
+                print('add detected: '+title)
+                Actions.restart_spotify(js['settings']['path'])
 class events():
     def start(self, window):
         window.start_listening()
